@@ -1,0 +1,115 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify Android project files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f settings.gradle || { echo "settings.gradle missing"; exit 1; }
+          test -f build.gradle || { echo "project build.gradle missing"; exit 1; }
+          test -f app/build.gradle || { echo "app/build.gradle missing"; exit 1; }
+          test -f app/src/main/AndroidManifest.xml || { echo "AndroidManifest.xml missing"; exit 1; }
+          mkdir -p app/src/main/res/drawable
+          if ! ls app/src/main/res/drawable/app_icon.* >/dev/null 2>&1; then
+            cat > app/src/main/res/drawable/app_icon.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#4f46e5" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#ffffff" android:pathData="M24,24h60v60h-60z"/>
+              <path android:fillColor="#4f46e5" android:pathData="M32,32h44v44h-44z"/>
+              <path android:fillColor="#ffffff" android:pathData="M49,36h10v36h-10zM36,49h36v10h-36z"/>
+          </vector>
+          EOF
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle :app:assembleDebug --stacktrace --no-daemon
+          mkdir -p dist
+          APK_PATH="$(find app/build/outputs/apk/debug -type f -name '*.apk' | head -n 1)"
+          test -n "$APK_PATH" || { echo "Debug APK was not produced"; exit 1; }
+          cp "$APK_PATH" "dist/${{ github.event.repository.name }}-debug.apk"
+
+      - name: Build Release AAB (optional)
+        shell: bash
+        continue-on-error: true
+        run: |
+          gradle :app:bundleRelease --stacktrace --no-daemon
+          mkdir -p dist
+          AAB_PATH="$(find app/build/outputs/bundle/release -type f -name '*.aab' | head -n 1 || true)"
+          if [ -n "$AAB_PATH" ]; then
+            cp "$AAB_PATH" "dist/${{ github.event.repository.name }}-release.aab"
+          fi
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: dist/*-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Release AAB
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: release-aab
+          path: dist/*-release.aab
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Build #${{ github.run_number }}"
+          make_latest: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
